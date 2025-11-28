@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Blueprint Editor — Offline (Save & Load + Export)</title>
+
+<script src="html2canvas.min.js"></script>
+<script src="jspdf.umd.min.js"></script>
+
+<style>
+  :root{
+    --bg:#071027; --node:#1a2336; --accent:#4fa2ff; --muted:#9aa5b1;
+  }
+  html,body{height:100%;margin:0;font-family:Inter,Segoe UI,Roboto,system-ui,-apple-system,"Helvetica Neue",Arial;background:linear-gradient(180deg,#071024 0%, #081226 60%);} 
+  #topbar{position:fixed;left:12px;top:10px;z-index:120;display:flex;gap:8px;align-items:center}
+  .btn{background:var(--accent);color:#fff;border:none;padding:8px 14px;border-radius:8px;cursor:pointer;font-weight:700;transition:background 0.2s,box-shadow 0.2s;}
+  .btn.ghost{background:transparent;border:1.5px solid rgba(255,255,255,0.14);color:var(--muted);font-weight:600;}
+  .btn.addRow{background: linear-gradient(90deg,#4fa2ff 60%,#76eaff 100%); color: #fff; border: none;}
+  .btn.delNode{background: linear-gradient(90deg,#ff6b6b 60%,#fda085 100%); color: #fff; border: none;}
+  .btn.deleteDesc{background: linear-gradient(90deg,#ffb347 60%, #ffcc7f 100%); color: #333; border: none;}
+  .btn.export{background: linear-gradient(90deg,#36d1c4 60%,#5affc5 100%); color: #222;}
+  .btn img{height:1em;width:1em;vertical-align:middle;}
+  .hint{color:var(--muted);font-size:13px;margin-left:8px}
+
+  #canvasWrap{position:fixed;left:0;top:56px;right:0;bottom:0;overflow:auto}
+  #canvas{position:relative;width:2000px;height:1400px;transform-origin:0 0;}
+  svg#linkLayer{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none;z-index:5}
+
+  .node{position:absolute;background:var(--node);border:2px solid rgba(70,110,175,0.9);border-radius:12px;padding:12px;min-width:280px;color:#dbeaff;box-shadow:0 12px 30px rgba(0,0,0,0.6);user-select:none;touch-action:none}
+  .node.dragging{transform:scale(1.02);z-index:1000}
+  .node.selected{outline:3px solid rgba(79,162,255,0.18)}
+  .title{font-weight:700;color:#8fb7ff;font-size:15px;margin-bottom:8px;outline:none;cursor:text}
+  table{width:100%;border-collapse:collapse}
+  tr.selected{outline:2px solid #4fa2ff;}
+  td{padding:8px;border-top:1px solid rgba(255,255,255,0.03);position:relative;outline:none;min-height:26px}
+  .pin-left,.pin-right{
+    position:absolute;top:50%;transform:translateY(-50%);
+    width:0;height:0;border-top:9px solid transparent;border-bottom:9px solid transparent;cursor:pointer;
+  }
+  .pin-left{left:-18px;border-right:14px solid #7ec7ff}
+  .pin-right{right:-18px;border-left:14px solid #7ec7ff}
+  .move-handle{
+    position:absolute;right:8px;bottom:8px;width:18px;height:18px;border-radius:50%;
+    background:#4fa2ff;border:2px solid rgba(16,32,52,0.9);cursor:grab;box-shadow:0 6px 18px rgba(79,162,255,0.12)
+  }
+  .move-handle:active{cursor:grabbing}
+  .img-btn{border:none;background:none;cursor:pointer;margin-right:4px;color:#4fa2ff;font-size:1.05em;}
+  #zoomBox{position:fixed;right:16px;bottom:16px;background:rgba(10,16,28,0.6);padding:8px;border-radius:10px;z-index:120;display:flex;gap:8px;align-items:center}
+  .zoomBtn{width:36px;height:36px;border-radius:6px;border:none;background:var(--accent);color:white;font-size:18px;cursor:pointer}
+  .zoomInfo{color:var(--muted);font-size:13px}
+
+/* SVG link styles */
+  .link-stroke { fill: none; stroke: rgba(120,180,255,0.95); stroke-width:3; stroke-linecap:round; stroke-linejoin:round; pointer-events:none; }
+  .link-hit    { fill: none; stroke: rgba(255,255,255,0.02); stroke-width:18; cursor:pointer; opacity:0; } /* large invisible hit */
+  .preview { stroke-dasharray: 6 4; opacity:0.95; }
+</style>
+</head>
+<body>
+
+<div id="topbar">
+  <button id="btnAdd" class="btn">+ Description Node</button>
+  <button id="btnAddImage" class="btn">+ Add Image to Selected</button>
+  <button id="btnUndo" class="btn ghost">Undo</button>
+  <button id="btnRedo" class="btn ghost">Redo</button>
+  <button id="btnClear" class="btn ghost">Clear</button>
+
+  <!-- moved node delete to topbar -->
+  <button id="btnDeleteNode" class="btn delNode">Delete Selected Node</button>
+
+  <button id="btnExportImage" class="btn export">Export as Image</button>
+  <button id="btnExportPdf" class="btn export">Export as PDF</button>
+
+  <!-- Save/Load controls -->
+  <button id="btnSaveJson" class="btn">Save .json</button>
+  <button id="btnLoadJson" class="btn ghost">Load .json</button>
+</div>
+
+<div id="canvasWrap">
+  <div id="canvas">
+    <svg id="linkLayer" xmlns="http://www.w3.org/2000/svg"></svg>
+  </div>
+</div>
+
+<div id="zoomBox">
+  <button id="zoomIn" class="zoomBtn">+</button>
+  <button id="zoomOut" class="zoomBtn">−</button>
+  <div class="zoomInfo" id="zoomLabel">100%</div>
+</div>
+
+<!-- hidden file input for load -->
+<input id="fileInput" type="file" accept="application/json" style="display:none"/>
+
+<script>
+
+const canvas = document.getElementById('canvas');
+const linkLayer = document.getElementById('linkLayer');
+const canvasWrap = document.getElementById('canvasWrap');
+const fileInput = document.getElementById('fileInput');
+
+let zoom = 1;
+const MIN_Z = 0.25, MAX_Z = 3, Z_STEP = 0.15;
+const LONG_PRESS_MS = 200;
+
+const nodes = new Map();
+let nodeCounter = 0;
+let links = [];
+let undoStack = [];
+let redoStack = [];
+let isPerformingUndoRedo = false;
+
+let selectedDescRow = null;
+let selectedNodeId = null; // newly added: currently selected node id
+
+function uid(prefix='id'){ return prefix + '-' + Date.now().toString(36).slice(-6) + Math.floor(Math.random()*900+100); }
+
+/* ---------- Serialization for Undo/Redo & Save/Load ---------- */
+function snapshotStateObj(){
+  const nodesArr = [];
+  nodes.forEach((el, id) => {
+    const left = parseFloat(el.style.left || 0);
+    const top = parseFloat(el.style.top || 0);
+    const title = el.querySelector('.title').innerText;
+    const rows = Array.from(el.querySelectorAll('tbody tr td')).map(td => td.innerHTML);
+    nodesArr.push({ id, left, top, title, rows });
+  });
+  return { nodes: nodesArr, links, nodeCounter };
+}
+function snapshotState(){ return JSON.stringify(snapshotStateObj()); }
+
+function pushUndo(){
+  if(isPerformingUndoRedo) return;
+  undoStack.push(snapshotState());
+  if(undoStack.length > 80) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoButtons();
+}
+
+function restoreFromSnapshot(serialized){
+  try {
+    const obj = typeof serialized === 'string' ? JSON.parse(serialized) : serialized;
+    // clear existing nodes and links
+    nodes.forEach(n => n.remove());
+    nodes.clear();
+    links = [];
+    (obj.nodes || []).forEach(n => {
+      const el = createNodeElementAt(n.left, n.top, false, n.id);
+      const titleEl = el.querySelector('.title');
+      if(titleEl) titleEl.innerText = n.title || '';
+      const tbody = el.querySelector('tbody');
+      tbody.innerHTML = '';
+      (n.rows || []).forEach(r => addDescriptionRow(tbody, r));
+    });
+    links = obj.links || [];
+    // restore nodeCounter if provided
+    nodeCounter = obj.nodeCounter || Math.max(nodes.size, 0) + 1;
+    updateLinks();
+  } catch(err){
+    alert('Failed to load blueprint: invalid file.');
+    console.error(err);
+  }
+}
+
+function updateUndoRedoButtons(){
+  document.getElementById('btnUndo').disabled = undoStack.length === 0;
+  document.getElementById('btnRedo').disabled = redoStack.length === 0;
+}
+
+/* ---------- UI buttons (create/clear/undo/redo) ---------- */
+document.getElementById('btnAdd').addEventListener('click', ()=>{ pushUndo(); createNode(120 + nodeCounter*18, 120 + nodeCounter*48); });
+document.getElementById('btnClear').addEventListener('click', ()=>{ if(confirm('Clear all?')){ pushUndo(); nodes.forEach(n=>n.remove()); nodes.clear(); links=[]; updateLinks(); selectedNodeId = null; selectedDescRow = null; }});
+
+document.getElementById('btnUndo').addEventListener('click', ()=>{ if(undoStack.length===0) return; isPerformingUndoRedo=true; const s = undoStack.pop(); redoStack.push(snapshotState()); restoreFromSnapshot(s); isPerformingUndoRedo=false; updateUndoRedoButtons(); });
+document.getElementById('btnRedo').addEventListener('click', ()=>{ if(redoStack.length===0) return; isPerformingUndoRedo=true; const s = redoStack.pop(); undoStack.push(snapshotState()); restoreFromSnapshot(s); isPerformingUndoRedo=false; updateUndoRedoButtons(); });
+
+/* Topbar Delete Selected Node */
+document.getElementById('btnDeleteNode').addEventListener('click', ()=> {
+  if(!selectedNodeId){ alert('Select a node first (click its title or body).'); return; }
+  const el = nodes.get(selectedNodeId);
+  if(!el){ alert('Selected node not found.'); selectedNodeId = null; return; }
+  if(confirm('Delete selected node?')){
+    pushUndo();
+    el.remove();
+    nodes.delete(selectedNodeId);
+    links = links.filter(l => l.a.nodeId !== selectedNodeId && l.b.nodeId !== selectedNodeId);
+    selectedNodeId = null;
+    selectedDescRow = null;
+    updateLinks();
+  }
+});
+
+/* Global Add Image */
+document.getElementById('btnAddImage').addEventListener('click', async ()=>{ 
+  if(!selectedDescRow){ alert('Select a description row first (click the row).'); return; }
+  const td = selectedDescRow.querySelector('td');
+  const url = prompt('Paste image URL:');
+  if(url){
+    pushUndo();
+    const wrapper = document.createElement('div');
+    wrapper.style.marginTop = '6px';
+    const img = document.createElement('img');
+    img.src = url;
+    img.style.maxWidth = '100%';
+    img.style.borderRadius = '6px';
+    try { img.crossOrigin = 'anonymous'; } catch(e){}
+    wrapper.appendChild(img);
+    td.appendChild(wrapper);
+    updateLinks();
+  }
+});
+
+/* ---------- Zoom behavior ---------- */
+const zoomLabel = document.getElementById('zoomLabel');
+document.getElementById('zoomIn').addEventListener('click', ()=>zoomAroundPoint(1 + Z_STEP));
+document.getElementById('zoomOut').addEventListener('click', ()=>zoomAroundPoint(1 - Z_STEP));
+let zoomCenterLocal = { x: 200, y: 120 };
+canvas.addEventListener('click', (ev)=>{
+  const p = clientToLocal(ev.clientX, ev.clientY);
+  zoomCenterLocal = p;
+  const pulse = document.createElement('div');
+  pulse.style.position='absolute'; pulse.style.left=(p.x-8)+'px'; pulse.style.top=(p.y-8)+'px';
+  pulse.style.width='16px'; pulse.style.height='16px'; pulse.style.borderRadius='50%'; pulse.style.background='rgba(79,162,255,0.22)';
+  pulse.style.pointerEvents='none'; canvas.appendChild(pulse);
+  setTimeout(()=>pulse.remove(),350);
+});
+function zoomAroundPoint(factor){
+  const newZoom = Math.max(MIN_Z, Math.min(MAX_Z, zoom * factor));
+  const beforeViewportX = zoom * zoomCenterLocal.x;
+  const beforeViewportY = zoom * zoomCenterLocal.y;
+
+  zoom = newZoom;
+  canvas.style.transform = `scale(${zoom})`;
+  zoomLabel.innerText = Math.round(zoom*100) + '%';
+
+  const afterViewportX = zoom * zoomCenterLocal.x;
+  const afterViewportY = zoom * zoomCenterLocal.y;
+  const dx = afterViewportX - beforeViewportX;
+  const dy = afterViewportY - beforeViewportY;
+
+  canvasWrap.scrollLeft += dx;
+  canvasWrap.scrollTop  += dy;
+
+  updateLinks();
+}
+function clientToLocal(clientX, clientY){
+  const rect = canvas.getBoundingClientRect();
+  const x = (clientX - rect.left) / zoom;
+  const y = (clientY - rect.top) / zoom;
+  return { x, y };
+}
+canvasWrap.addEventListener('wheel', (ev)=>{
+  if(ev.ctrlKey){
+    ev.preventDefault();
+    const p = clientToLocal(ev.clientX, ev.clientY);
+    zoomCenterLocal = p;
+    if(ev.deltaY < 0) zoomAroundPoint(1 + Z_STEP);
+    else zoomAroundPoint(1 - Z_STEP);
+  }
+}, { passive: false });
+
+/* ---------- Node DOM creation ---------- */
+function createNode(x=120,y=120){
+  return createNodeElementAt(x,y,true);
+}
+function createNodeElementAt(x,y,incrementCounter=true, forcedId){
+  if(incrementCounter !== false) nodeCounter++;
+  const id = forcedId || uid('n');
+  const el = document.createElement('div');
+  el.className = 'node';
+  el.dataset.id = id;
+  el.style.left = x + 'px';
+  el.style.top = y + 'px';
+  el.innerHTML = `
+    <div class="title" contenteditable="true">Node ${nodeCounter}</div>
+    <table><tbody></tbody></table>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn addRow">+ Desc</button>
+      <button class="btn deleteDesc deleteDescLocal">- Desc</button>
+    </div>
+    <div class="move-handle" title="Drag to move"></div>
+  `;
+  canvas.appendChild(el);
+  nodes.set(id, el);
+  addDescriptionRow(el.querySelector('tbody'), 'Description...');
+
+  // Node selection when clicking anywhere on node (but not on editable td)
+  el.addEventListener('click', (e) => {
+    // ignore clicks inside editable td to avoid stealing focus
+    if(e.target && (e.target.tagName === 'TD' || e.target.closest('td') || e.target.classList.contains('title'))) {
+      // allow selection but don't prevent editing
+    }
+    selectNode(id);
+    e.stopPropagation();
+  });
+
+  // +Desc button
+  el.querySelector('.addRow').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    pushUndo();
+    addDescriptionRow(el.querySelector('tbody'));
+  });
+
+  // Delete Row button inside node
+  el.querySelector('.deleteDescLocal').addEventListener('click', (e)=>{
+    e.stopPropagation();
+    const tr = selectedDescRow;
+    if(!tr){ alert('Select a description row inside this node first.'); return; }
+    // verify selected row belongs to this node
+    const tbody = el.querySelector('tbody');
+    if(!tbody.contains(tr)){ alert('Selected row is not inside this node. Select a row in this node to delete.'); return; }
+    pushUndo();
+    tbody.removeChild(tr);
+    selectedDescRow = null;
+    updateLinks();
+  });
+
+  // Move via handle only
+  const handle = el.querySelector('.move-handle');
+  enableImmediateDrag(el, handle);
+  return el;
+}
+
+/* Select node helper */
+function selectNode(id){
+  if(selectedNodeId && nodes.has(selectedNodeId)){
+    nodes.get(selectedNodeId).classList.remove('selected');
+  }
+  selectedNodeId = id;
+  const el = nodes.get(id);
+  if(el) el.classList.add('selected');
+}
+
+/* Description row with selectable highlight */
+function addDescriptionRow(tbody, html='Description...'){
+  const tr = document.createElement('tr');
+  const td = document.createElement('td');
+  td.contentEditable = true;
+  td.spellcheck = false;
+  td.innerHTML = html;
+
+  const left = document.createElement('div'); left.className='pin-left';
+  const right = document.createElement('div'); right.className='pin-right';
+  attachPinLongPress(left, 'left', td);
+  attachPinLongPress(right, 'right', td);
+  td.appendChild(left);
+  td.appendChild(right);
+  tr.appendChild(td);
+  tbody.appendChild(tr);
+  tr.onclick = function(e){
+    if (selectedDescRow) selectedDescRow.classList.remove('selected');
+    selectedDescRow = tr;
+    tr.classList.add('selected');
+    // set selected node id based on the node that contains this tbody
+    const nodeEl = tr.closest('.node');
+    if(nodeEl) selectNode(nodeEl.dataset.id);
+    e.stopPropagation();
+  };
+  return tr;
+}
+document.body.addEventListener('click', ()=>{
+  if(selectedDescRow){ selectedDescRow.classList.remove('selected'); }
+  selectedDescRow = null;
+  // do not clear selected node on body click; keep node selection until user clicks another node
+});
+
+/* Delete key behavior for selected row */
+window.addEventListener('keydown', (ev)=>{
+  if(ev.key === 'Delete' && selectedDescRow){
+    ev.preventDefault();
+    const tr = selectedDescRow;
+    const tbody = tr.parentElement;
+    pushUndo();
+    tbody.removeChild(tr);
+    selectedDescRow = null;
+    updateLinks();
+  }
+});
+
+/* ---------- Move by handle only ---------- */
+function enableImmediateDrag(nodeEl, handleEl){
+  let pointerId = null, startX=0, startY=0, origX=0, origY=0;
+  handleEl.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation(); ev.preventDefault();
+    pointerId = ev.pointerId;
+    try{ nodeEl.setPointerCapture(pointerId); }catch(e){}
+    startX = ev.clientX; startY = ev.clientY;
+    origX = parseFloat(nodeEl.style.left)||0; origY = parseFloat(nodeEl.style.top)||0;
+    nodeEl.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    pushUndo();
+    const onMove = (e) => {
+      if(e.pointerId !== pointerId) return;
+      const dx = (e.clientX - startX)/zoom;
+      const dy = (e.clientY - startY)/zoom;
+      nodeEl.style.left = (origX + dx) + 'px';
+      nodeEl.style.top  = (origY + dy) + 'px';
+      updateLinks();
+    };
+    const onUp = (e) => {
+      if(e.pointerId !== pointerId) return;
+      try{ nodeEl.releasePointerCapture(pointerId); }catch(e){}
+      nodeEl.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      pointerId = null;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  });
+}
+
+/* ---------- Pin linking ---------- */
+let linkingState = null;
+let linkingStateGlobalCleanup = null;
+function attachPinLongPress(pinEl, side, tdEl){
+  let pressTimer = null;
+  let pointerId = null;
+  let pressStartX = 0, pressStartY = 0;
+  pinEl.addEventListener('pointerdown', (ev) => {
+    ev.stopPropagation(); ev.preventDefault();
+    pointerId = ev.pointerId;
+    pressStartX = ev.clientX; pressStartY = ev.clientY;
+    try{ pinEl.setPointerCapture(pointerId); }catch(e){}
+    pressTimer = setTimeout(()=> {
+      const nodeEl = pinEl.closest('.node');
+      const nodeId = nodeEl.dataset.id;
+      const tr = tdEl.parentElement;
+      const tbody = tr.parentElement;
+      const rowIndex = Array.from(tbody.children).indexOf(tr);
+      linkingState = { start:{ nodeId, rowIndex, side, tdEl }, pointerId, preview: createPreviewPath() };
+    }, LONG_PRESS_MS);
+  });
+  pinEl.addEventListener('pointermove', (ev) => {
+    if(!pressTimer) return;
+    const dx = Math.abs(ev.clientX - pressStartX);
+    const dy = Math.abs(ev.clientY - pressStartY);
+    if(dx > 6 || dy > 6){ clearTimeout(pressTimer); pressTimer=null; try{ pinEl.releasePointerCapture(ev.pointerId);}catch{}; }
+  });
+  pinEl.addEventListener('pointerup', (ev) => {
+    if(pressTimer){ clearTimeout(pressTimer); pressTimer=null; try{ pinEl.releasePointerCapture(ev.pointerId);}catch{}; return; }
+    if(linkingState && linkingState.pointerId === ev.pointerId){
+      finishLinkAtClient(ev.clientX, ev.clientY);
+    }
+  });
+  pinEl.addEventListener('pointercancel', (ev) => {
+    if(pressTimer) clearTimeout(pressTimer);
+    if(linkingState && linkingState.pointerId === ev.pointerId) cancelLinking();
+  });
+}
+function createPreviewPath(){
+  const p = document.createElementNS('http://www.w3.org/2000/svg','path');
+  p.setAttribute('class','preview link-stroke');
+  syncSVGSize();
+  linkLayer.appendChild(p);
+  const onMove = (ev) => {
+    if(!linkingState) return;
+    const startPt = getPinCenterLocal(linkingState.start);
+    if(!startPt) return;
+    const local = clientToLocal(ev.clientX, ev.clientY);
+    const endPt = { x: local.x, y: local.y };
+    setPathD(p, startPt, endPt, 'curve');
+  };
+  const onUp = (ev) => {
+    if(!linkingState) return;
+    finishLinkAtClient(ev.clientX, ev.clientY);
+  };
+  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointerup', onUp);
+  linkingStateGlobalCleanup = () => {
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+  };
+  return p;
+}
+function finishLinkAtClient(clientX, clientY){
+  const el = document.elementFromPoint(clientX, clientY);
+  if(!linkingState) return;
+  const targetPin = el && (el.closest('.pin-left') || el.closest('.pin-right'));
+  if(targetPin){
+    const targetSide = targetPin.classList.contains('pin-left') ? 'left' : 'right';
+    const targetTd = targetPin.closest('td');
+    const targetTr = targetTd.parentElement;
+    const targetRowIndex = Array.from(targetTr.parentElement.children).indexOf(targetTr);
+    const targetNode = targetPin.closest('.node');
+    const targetNodeId = targetNode.dataset.id;
+    const s = linkingState.start;
+    if(!(s.nodeId === targetNodeId && s.rowIndex === targetRowIndex && s.side === targetSide)){
+      pushUndo();
+      links.push({ id: uid('l'), a: s, b: { nodeId: targetNodeId, rowIndex: targetRowIndex, side: targetSide }, type: 'curve' });
+      cleanupLinkPreview();
+      updateLinks();
+      return;
+    }
+  }
+  cancelLinking();
+}
+function cancelLinking(){ if(linkingState){ cleanupLinkPreview(); linkingState = null; } }
+function cleanupLinkPreview(){ if(linkingState && linkingState.preview){ linkingState.preview.remove(); } if(typeof linkingStateGlobalCleanup === 'function'){ linkingStateGlobalCleanup(); } linkingState = null; }
+
+/* get center position of a pin relative to canvas local coordinates (taking zoom into account) */
+function getPinCenterLocal(pinRef){
+  try {
+    const nodeEl = nodes.get(pinRef.nodeId);
+    if(!nodeEl) return null;
+    const tbody = nodeEl.querySelector('tbody');
+    const tr = tbody.children[pinRef.rowIndex];
+    if(!tr) return null;
+    const td = tr.querySelector('td');
+    const rectTd = td.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
+    const x = ((rectTd.left + rectTd.right) / 2 - canvasRect.left) / zoom;
+    const y = ((rectTd.top + rectTd.bottom) / 2 - canvasRect.top) / zoom;
+    const gap = 12;
+    const finalX = x + (pinRef.side === 'left' ? - (rectTd.width/2 + gap) : (rectTd.width/2 + gap));
+    const finalY = y;
+    return { x: finalX, y: finalY };
+  } catch(e){ return null; }
+}
+
+/* SVG helpers for link drawing */
+function bezierD(a,b){
+  const dx = Math.abs(b.x - a.x);
+  const cp = Math.max(40, dx * 0.45);
+  const cp1x = a.x + cp;
+  const cp1y = a.y;
+  const cp2x = b.x - cp;
+  const cp2y = b.y;
+  return `M ${a.x} ${a.y} C ${cp1x} ${cp1y}, ${cp2x} ${cp2y}, ${b.x} ${b.y}`;
+}
+function setPathD(pathEl, a,b,type='curve'){ if(type==='straight'){ pathEl.setAttribute('d', `M ${a.x} ${a.y} L ${b.x} ${b.y}`);} else { pathEl.setAttribute('d', bezierD(a,b)); } }
+function createSVG(tag, attrs){ const ns='http://www.w3.org/2000/svg'; const el=document.createElementNS(ns,tag); for(const k in attrs) el.setAttribute(k, attrs[k]); return el; }
+
+function syncSVGSize(){
+  const w = canvas.offsetWidth;
+  const h = canvas.offsetHeight;
+  linkLayer.setAttribute('width', w);
+  linkLayer.setAttribute('height', h);
+  linkLayer.setAttribute('viewBox', `0 0 ${w} ${h}`);
+}
+
+/* update and draw the stored links */
+function updateLinks(){
+  syncSVGSize();
+  const children = Array.from(linkLayer.children);
+  children.forEach(c => { if(!c.classList || !c.classList.contains('preview')) linkLayer.removeChild(c); });
+  links.forEach(l => {
+    const a = getPinCenterLocal(l.a);
+    const b = getPinCenterLocal(l.b);
+    if(!a || !b) return;
+    if(l.type === 'straight'){
+      const line = createSVG('line', { x1:a.x, y1:a.y, x2:b.x, y2:b.y, class:'link-stroke' });
+      const hit  = createSVG('line', { x1:a.x, y1:a.y, x2:b.x, y2:b.y, class:'link-hit' });
+      hit.style.pointerEvents = 'stroke';
+      linkLayer.appendChild(hit); linkLayer.appendChild(line);
+      attachLinkDelete(hit, l.id);
+    } else {
+      const d = bezierD(a,b);
+      const path = createSVG('path', { d, class:'link-stroke' });
+      const hit  = createSVG('path', { d, class:'link-hit' });
+      hit.style.pointerEvents = 'stroke';
+      linkLayer.appendChild(hit); linkLayer.appendChild(path);
+      attachLinkDelete(hit, l.id);
+    }
+  });
+}
+function attachLinkDelete(hitEl, linkId){
+  hitEl.addEventListener('click', (ev)=>{
+    ev.stopPropagation();
+    if(confirm('Delete this link?')){ pushUndo(); links = links.filter(x => x.id !== linkId); updateLinks(); }
+  });
+}
+
+/* ---------- Export Image & PDF ---------- */
+async function exportToImage() {
+  if(typeof html2canvas !== 'function') {
+    alert('html2canvas is not available. To enable PNG export offline, embed html2canvas.min.js into the HTML (see top comments).');
+    return;
+  }
+  const canvasEl = document.getElementById('canvas');
+  const oldTransform = canvasEl.style.transform;
+  canvasEl.style.transform = 'none';
+  try {
+    const canvasImg = await html2canvas(canvasEl, { scale: 2, useCORS: true, allowTaint: true });
+    const a = document.createElement('a');
+    a.download = 'blueprint.png';
+    a.href = canvasImg.toDataURL();
+    a.click();
+  } catch(err) {
+    alert('PNG export failed. Check console for details.');
+    console.error(err);
+  } finally {
+    canvasEl.style.transform = oldTransform;
+  }
+}
+
+async function exportToPdf() {
+  if(!window.jspdf || !window.jspdf.jsPDF) {
+    alert('jsPDF is not available. To enable PDF export offline, embed jspdf.umd.min.js into the HTML (see top comments).');
+    return;
+  }
+  if(typeof html2canvas !== 'function') {
+    alert('html2canvas is required to rasterize the canvas for PDF export. Embed html2canvas.min.js into the HTML (see top comments).');
+    return;
+  }
+  const canvasEl = document.getElementById('canvas');
+  const oldTransform = canvasEl.style.transform;
+  canvasEl.style.transform = 'none';
+  try {
+    const canvasImg = await html2canvas(canvasEl, { scale: 2, useCORS: true, allowTaint: true });
+    const imgData = canvasImg.toDataURL('image/png');
+    const pdf = new window.jspdf.jsPDF({
+      orientation: canvasEl.offsetWidth > canvasEl.offsetHeight ? 'l' : 'p',
+      unit: 'pt',
+      format: [canvasEl.offsetWidth, canvasEl.offsetHeight]
+    });
+    pdf.addImage(imgData, 'PNG', 0, 0, canvasEl.offsetWidth, canvasEl.offsetHeight);
+    pdf.save('blueprint.pdf');
+  } catch(err) {
+    alert('PDF export failed. Check console for details.');
+    console.error(err);
+  } finally {
+    canvasEl.style.transform = oldTransform;
+  }
+}
+
+document.getElementById('btnExportImage').onclick = exportToImage;
+document.getElementById('btnExportPdf').onclick = exportToPdf;
+
+/* ---------- Save / Load (file only) ---------- */
+function downloadJSON(obj){
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const name = `blueprint-${new Date().toISOString().slice(0,19).replace(/[:T]/g,'-')}.json`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+document.getElementById('btnSaveJson').addEventListener('click', ()=>{
+  const obj = snapshotStateObj();
+  downloadJSON(obj);
+});
+
+document.getElementById('btnLoadJson').addEventListener('click', ()=>{
+  fileInput.value = '';
+  fileInput.click();
+});
+
+fileInput.addEventListener('change', (ev)=>{
+  const f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const parsed = JSON.parse(e.target.result);
+      if(!parsed || !Array.isArray(parsed.nodes)) {
+        alert('Invalid blueprint file.');
+        return;
+      }
+      pushUndo();
+      restoreFromSnapshot(parsed);
+    } catch(err){
+      alert('Failed to parse file. Is it a blueprint JSON?');
+      console.error(err);
+    }
+  };
+  reader.readAsText(f);
+});
+
+/* ---------- initial demo nodes ---------- */
+(function initDemo(){
+  createNodeElementAt(80,120);
+  createNodeElementAt(420,220);
+  createNodeElementAt(220,420);
+  undoStack = []; redoStack = []; pushUndo(); updateUndoRedoButtons();
+})();
+
+window.addEventListener('resize', ()=>updateLinks());
+canvasWrap.addEventListener('scroll', ()=>updateLinks());
+setInterval(()=>updateLinks(), 300);
+
+</script>
+</body>
+</html>

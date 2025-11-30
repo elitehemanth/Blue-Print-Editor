@@ -217,3 +217,15 @@ Mind maps, visual study notes, flow explanations.
 #Brainstorming
 
 Capture ideas with flexible visual structure.
+
+# Buttons Purpose
+<hr>
+<img width="1611" height="954" alt="Screenshot 2025-11-30 222655" src="https://github.com/user-attachments/assets/07cd910b-144d-43fb-8ba2-475fd08a9c46" />
+<hr>
+
+# Example Use Case
+<img width="1619" height="951" alt="Screenshot 2025-11-30 221337" src="https://github.com/user-attachments/assets/35f09a71-43c2-4d47-8f7a-07d3d258ab67" />
+<hr>
+
+
+# Not My Style
